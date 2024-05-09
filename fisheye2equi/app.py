@@ -157,32 +157,49 @@ def main():
         output_width = selected_size[0]
         output_height = selected_size[1]
 
-    if st.button("Preview Equirectangular Projections"):
-        # Show progress bar
-        progress_text = "Processing..."
-        progress_bar = st.progress(0, text=progress_text)
+        if st.button("Preview Equirectangular Projections"):
+            # Show progress bar
+            progress_text = "Processing..."
+            progress_bar = st.progress(0, text=progress_text)
 
-        # Split the combined image into two fisheye images
-        h, w = combined_image.shape[:2]
-        fisheye1 = combined_image[:, :w // 2, :]
-        fisheye2 = combined_image[:, w // 2:, :]
-        
-        # Draw overlap lines on the fisheye images
-        fisheye1_overlap = draw_overlap_lines(fisheye1, overlap_angle)
-        fisheye2_overlap = draw_overlap_lines(fisheye2, -overlap_angle)
+            # Split the combined image into two fisheye images
+            h, w = combined_image.shape[:2]
+            fisheye1 = combined_image[:, :w // 2, :]
+            fisheye2 = combined_image[:, w // 2:, :]
 
-        # Apply equirectangular projection to each fisheye image
-        with st.spinner("Applying equirectangular projection..."):
-            equi1 = equisolid_to_equirectangular(fisheye1_overlap, output_width // 2, output_height, overlap_angle)
-            equi2 = equisolid_to_equirectangular(fisheye2_overlap, output_width // 2, output_height, overlap_angle)
+            # Draw overlap lines on the fisheye images
+            fisheye1_overlap = draw_overlap_lines(fisheye1, overlap_angle)
+            fisheye2_overlap = draw_overlap_lines(fisheye2, -overlap_angle)
 
-        # Update progress bar
-        progress_bar.progress(1, text="Processing complete!")
+            # Apply equirectangular projection to each fisheye image
+            with st.spinner("Applying equirectangular projection..."):
+                equi1 = equisolid_to_equirectangular(fisheye1_overlap, output_width // 2, output_height, overlap_angle)
+                equi2 = equisolid_to_equirectangular(fisheye2_overlap, output_width // 2, output_height, -overlap_angle)
 
-        # Display the equirectangular projections side by side
-        st.image([equi1, equi2], caption=["Equirectangular Projection 1", "Equirectangular Projection 2"], width=output_width // 2)        # Convert button
-        
+            # Update progress bar
+            progress_bar.progress(1, text="Processing complete!")
 
+            # Convert the fisheye images from BGR to RGB
+            fisheye1_overlap = cv2.cvtColor(fisheye1_overlap, cv2.COLOR_BGR2RGB)
+            fisheye2_overlap = cv2.cvtColor(fisheye2_overlap, cv2.COLOR_BGR2RGB)
+
+            # Resize the fisheye images to match the size of the original image
+            fisheye1_resized = cv2.resize(fisheye1_overlap, (w // 2, h))
+            fisheye2_resized = cv2.resize(fisheye2_overlap, (w // 2, h))
+
+            # Display the fisheye images with overlap lines side by side
+            st.image([fisheye1_resized, fisheye2_resized], caption=["Fisheye 1 with Overlap", "Fisheye 2 with Overlap"], width=w // 2)
+
+            # Convert the equirectangular projections from BGR to RGB
+            equi1 = cv2.cvtColor(equi1, cv2.COLOR_BGR2RGB)
+            equi2 = cv2.cvtColor(equi2, cv2.COLOR_BGR2RGB)
+
+            # Resize the equirectangular projections to match the size of the original image
+            equi1_resized = cv2.resize(equi1, (w // 2, h // 2))
+            equi2_resized = cv2.resize(equi2, (w // 2, h // 2))
+
+            # Display the equirectangular projections side by side
+            st.image([equi1_resized, equi2_resized], caption=["Equirectangular Projection 1", "Equirectangular Projection 2"], width=w // 2)
         
         if st.button("Convert"):
             # Show progress bar
