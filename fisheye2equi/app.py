@@ -2,7 +2,15 @@ import numpy as np
 import cv2
 import streamlit as st
 
-def equisolid_to_equirectangular(fisheye_img, width, height, overlap_angle):
+# Constants for polynomial coefficients
+P1 = -7.5625e-17
+P2 = 1.9589e-13
+P3 = -1.8547e-10
+P4 = 6.1997e-08
+P5 = -6.9432e-05
+P6 = 0.9976
+
+def fisheye_to_equirectangular(fisheye_img, width, height, fov=195):
     equirectangular = np.zeros((height, width, 3), dtype=np.uint8)
     if fisheye_img is None:
         return equirectangular
@@ -11,232 +19,244 @@ def equisolid_to_equirectangular(fisheye_img, width, height, overlap_angle):
     cx, cy = w // 2, h // 2  # Center of the fisheye image
     r_max = min(cx, cy)  # Maximum radius of the fisheye
 
-    overlap_pixels = int(width * overlap_angle / 360)
+    for y_eq in range(height):
+        theta = (y_eq / height - 0.5) * np.pi
+        for x_eq in range(width):
+            phi = (0.5 - x_eq / width) * 2 * np.pi
 
-    for x_eq in range(width):
-        theta = 2 * np.pi * (x_eq - overlap_pixels) / (width - 2 * overlap_pixels)  # 0 to 2pi
-        for y_eq in range(height):
-            phi = np.pi * y_eq / height - np.pi / 2  # -pi/2 to pi/2
-            r = 2 * r_max * np.sin(phi / 2)  # Equisolid angle projection
-            fx = int(cx + r * np.cos(theta))
-            fy = int(cy + r * np.sin(theta))
-            if 0 <= fx < w and 0 <= fy < h:
-                equirectangular[y_eq, x_eq, :] = fisheye_img[fy, fx, :]
+            # Calculate fisheye radius using polynomial coefficients
+            r = P1 * phi**5 + P2 * phi**4 + P3 * phi**3 + P4 * phi**2 + P5 * phi + P6
+            r *= r_max
+
+            # Calculate fisheye coordinates
+            x_fish = int(cx + r * np.cos(theta))
+            y_fish = int(cy + r * np.sin(theta))
+
+            if 0 <= x_fish < w and 0 <= y_fish < h:
+                equirectangular[y_eq, x_eq, :] = fisheye_img[y_fish, x_fish, :]
 
     return equirectangular
 
-def stitch_fisheye_pair(fisheye1, fisheye2, width, height, overlap_angle):
-    if fisheye1 is None or fisheye2 is None:
+def compensate_light(equirectangular_img, clip_limit=2.0, tile_grid_size=(8, 8)):
+    if equirectangular_img is None:
         return None
 
-    # Convert fisheye images from BGR to RGB
-    fisheye1 = cv2.cvtColor(fisheye1, cv2.COLOR_BGR2RGB)
-    fisheye2 = cv2.cvtColor(fisheye2, cv2.COLOR_BGR2RGB)
+    # Convert the image to the LAB color space
+    lab_img = cv2.cvtColor(equirectangular_img, cv2.COLOR_BGR2LAB)
 
-    # Apply equirectangular projection to each fisheye image
-    equi1 = equisolid_to_equirectangular(fisheye1, width // 2, height, overlap_angle)
-    equi2 = equisolid_to_equirectangular(fisheye2, width // 2, height, -overlap_angle)
+    # Split the LAB image into L, A, and B channels
+    l_channel, a_channel, b_channel = cv2.split(lab_img)
 
-    # Determine the stitching seam based on the overlap angle
-    overlap_pixels = int(width * abs(overlap_angle) / 360)
-    seam_position = width // 2
+    # Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to the L channel
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    l_channel_equalized = clahe.apply(l_channel)
 
-    # Create the final equirectangular image
-    equirectangular = np.zeros((height, width, 3), dtype=np.uint8)
+    # Merge the equalized L channel back with the A and B channels
+    lab_img_equalized = cv2.merge((l_channel_equalized, a_channel, b_channel))
 
-    # Stitch the equirectangular projections
-    equirectangular[:, :seam_position - overlap_pixels] = equi1[:, :seam_position - overlap_pixels]
-    equirectangular[:, seam_position + overlap_pixels:] = equi2[:, seam_position - overlap_pixels:]
+    # Convert the image back to the BGR color space
+    equirectangular_img_equalized = cv2.cvtColor(lab_img_equalized, cv2.COLOR_LAB2BGR)
 
-    # Apply blending to minimize the seam
-    blend_width = overlap_pixels // 2
-    if blend_width > 0:
-        left_blend = equirectangular[:, seam_position - overlap_pixels - blend_width:seam_position - overlap_pixels]
-        right_blend = equirectangular[:, seam_position + overlap_pixels:seam_position + overlap_pixels + blend_width]
-        alpha = np.linspace(0, 1, blend_width)
-        alpha_mask = np.repeat(alpha[np.newaxis, :], height, axis=0)
-        alpha_mask = np.repeat(alpha_mask[:, :, np.newaxis], 3, axis=2)
-        equirectangular[:, seam_position - overlap_pixels - blend_width:seam_position - overlap_pixels] = (
-            left_blend * (1 - alpha_mask) + right_blend * alpha_mask
-        ).astype(np.uint8)
+    return equirectangular_img_equalized
 
-    return equirectangular
+def find_match_loc(ref_img, tmpl_img, method=cv2.TM_CCOEFF_NORMED):
+    if ref_img is None or tmpl_img is None:
+        return None
 
-def get_image_properties(image):
-    height, width = image.shape[:2]
-    aspect_ratio = width / height
-    properties = {
-        "Width": width,
-        "Height": height,
-        "Aspect Ratio": aspect_ratio
-    }
-    return properties
+    # Perform template matching
+    result = cv2.matchTemplate(ref_img, tmpl_img, method)
 
-def suggest_output_sizes(image):
-    properties = get_image_properties(image)
-    width = properties["Width"]
-    height = properties["Height"]
+    # Find the location of the best match
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
 
-    suggested_sizes = []
-
-    if width == 3840 and height == 1920:  # Gear 360 2017
-        suggested_sizes = [
-            (4096, 2048),  # 4K
-            (2048, 1024),  # 2K
-            (1920, 1080)   # 1080p
-        ]
-    elif width == 5120 and height == 2560:  # Gear 360 2016
-        suggested_sizes = [
-            (7776, 3888),  # 30 megapixels
-            (5472, 2736),  # 15 megapixels
-            (3840, 1920)   # 8 megapixels
-        ]
+    if method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
+        # For methods based on squared differences, the best match is the minimum value
+        match_loc = min_loc
     else:
-        suggested_sizes = [
-            (width, height // 2),
-            (width // 2, height // 4),
-            (width // 4, height // 8)
-        ]
+        # For other methods, the best match is the maximum value
+        match_loc = max_loc
 
-    return suggested_sizes
+    return match_loc
 
-def draw_overlap_lines(fisheye_img, overlap_angle, color=(0, 255, 0), thickness=2):
-    h, w = fisheye_img.shape[:2]
-    cx, cy = w // 2, h // 2
-    r = min(cx, cy)
+def create_control_points(match_loc_left, match_loc_right, equi_left, equi_right, template_size=(200, 100), num_points=10):
+    if match_loc_left is None or match_loc_right is None:
+        return None, None
 
-    # Calculate the angle range based on the overlap angle
-    start_angle = -overlap_angle / 2
-    end_angle = overlap_angle / 2
+    h, w = template_size
+    half_h, half_w = h // 2, w // 2
 
-    # Convert angles from degrees to radians
-    start_angle_rad = np.deg2rad(start_angle)
-    end_angle_rad = np.deg2rad(end_angle)
+    # Calculate the range of coordinates for control points
+    start_y = max(match_loc_left[1] - half_h, 0)
+    end_y = min(match_loc_left[1] + half_h, equi_left.shape[0])
+    start_x_left = max(match_loc_left[0] - half_w, 0)
+    end_x_left = min(match_loc_left[0] + half_w, equi_left.shape[1])
+    start_x_right = max(match_loc_right[0] - half_w, 0)
+    end_x_right = min(match_loc_right[0] + half_w, equi_right.shape[1])
 
-    # Calculate the endpoints of the overlap lines
-    start_x = int(cx + r * np.cos(start_angle_rad))
-    start_y = int(cy + r * np.sin(start_angle_rad))
-    end_x = int(cx + r * np.cos(end_angle_rad))
-    end_y = int(cy + r * np.sin(end_angle_rad))
+    # Generate control points
+    control_points_left = []
+    control_points_right = []
 
-    # Draw the overlap lines on the fisheye image
-    cv2.line(fisheye_img, (cx, cy), (start_x, start_y), color, thickness)
-    cv2.line(fisheye_img, (cx, cy), (end_x, end_y), color, thickness)
+    for i in range(num_points):
+        y = np.random.randint(start_y, end_y)
+        x_left = np.random.randint(start_x_left, end_x_left)
+        x_right = np.random.randint(start_x_right, end_x_right)
 
-    return fisheye_img
+        control_points_left.append((x_left, y))
+        control_points_right.append((x_right, y))
+
+    return control_points_left, control_points_right
+
+
+
+def stitch_equirectangular_pair(equi_left, equi_right, width, height, control_points_left=None, control_points_right=None, blend_mask=None):
+    print("Debug before stitching:")
+    print("equi_left shape:", equi_left.shape)
+    print("equi_right shape:", equi_right.shape)
+    print("blend_mask shape:", blend_mask.shape)
+
+    if equi_left is None or equi_right is None:
+        return None
+
+    if control_points_left is not None and control_points_right is not None:
+        control_points_left = np.array(control_points_left, dtype=np.float32)
+        control_points_right = np.array(control_points_right, dtype=np.float32)
+        homography, _ = cv2.findHomography(control_points_right, control_points_left, cv2.RANSAC)
+        equi_right_aligned = cv2.warpPerspective(equi_right, homography, (width, height))
+    else:
+        equi_right_aligned = cv2.resize(equi_right, (equi_left.shape[1], equi_left.shape[0]))
+
+    # Combine images side by side
+    combined_image = np.concatenate((equi_left, equi_right_aligned), axis=1)
+
+    # Apply the blending mask
+    if combined_image.shape[1] != blend_mask.shape[1]:
+        print("Resizing blend mask to match combined image width.")
+        blend_mask = cv2.resize(blend_mask, (combined_image.shape[1], combined_image.shape[0]))
+
+    stitched = combined_image * blend_mask
+    stitched = np.clip(stitched, 0, 255).astype(np.uint8)
+
+    return stitched
+
+
+
+
+
+def create_blend_mask(total_width, height, overlap_width):
+    mask = np.zeros((height, total_width), dtype=np.float32)
+    start_fade = total_width // 2 - overlap_width // 2
+    end_fade = total_width // 2 + overlap_width // 2
+
+    # Gradient within the overlap area
+    mask[:, :start_fade] = 1
+    mask[:, start_fade:end_fade] = np.linspace(1, 0, end_fade - start_fade)
+    mask[:, end_fade:] = 0
+
+    # Convert mask to 3 channels
+    mask = np.stack([mask]*3, axis=-1)
+    return mask
+
+
+
+def resize_image(image, max_width=800):
+    h, w = image.shape[:2]
+    if w > max_width:
+        ratio = max_width / w
+        new_height = int(h * ratio)
+        resized_image = cv2.resize(image, (max_width, new_height))
+    else:
+        resized_image = image.copy()
+    return resized_image
 
 def main():
-    st.title("Fisheye Image Stitching")
+    st.title("Gear 360 Fisheye to Equirectangular Conversion")
 
     # File upload
-    uploaded_file = st.file_uploader("Choose an image file", type=["jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader("Choose a Gear 360 image file", type=["jpg", "jpeg", "png"])
 
     if uploaded_file is not None:
         # Read the uploaded image
         file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        combined_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        gear360_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
         # Convert the uploaded image from BGR to RGB
-        combined_image_rgb = cv2.cvtColor(combined_image, cv2.COLOR_BGR2RGB)
+        gear360_image_rgb = cv2.cvtColor(gear360_image, cv2.COLOR_BGR2RGB)
 
-        # Display the uploaded image
-        st.image(combined_image_rgb, caption="Uploaded Image", use_column_width=True)
+        # Resize the image for display
+        resized_image = resize_image(gear360_image_rgb)
 
-        # Get image properties
-        properties = get_image_properties(combined_image)
-        st.write("Image Properties:")
-        st.write(properties)
+        # Display the resized uploaded image
+        st.image(resized_image, caption="Uploaded Gear 360 Image", use_column_width=True)
 
-        # Suggest output sizes
-        suggested_sizes = suggest_output_sizes(combined_image)
-        st.write("Suggested Output Sizes:")
-        selected_size = st.selectbox("Select an output size", options=suggested_sizes)
+        # Split the Gear 360 image into left and right fisheye images
+        h, w = gear360_image.shape[:2]
+        fisheye_left = gear360_image[:, :w // 2, :]
+        fisheye_right = gear360_image[:, w // 2:, :]
 
-        # Input fields for modification
-        overlap_angle = st.slider("Overlap Angle", min_value=-180, max_value=180, value=0, step=1)
-        output_width = selected_size[0]
-        output_height = selected_size[1]
+        # Input fields for output size and FOV
+        output_width = st.number_input("Output Width", value=4096, min_value=1024, max_value=8192, step=1)
+        output_height = output_width // 2
+        fov = st.number_input("Field of View (FOV)", value=195, min_value=180, max_value=220, step=1)
 
-        if st.button("Preview Equirectangular Projections"):
-            # Show progress bar
-            progress_text = "Processing..."
-            progress_bar = st.progress(0, text=progress_text)
+        # Checkbox for enabling light compensation
+        enable_light_compensation = st.checkbox("Enable Light Compensation")
 
-            # Split the combined image into two fisheye images
-            h, w = combined_image.shape[:2]
-            fisheye1 = combined_image[:, :w // 2, :]
-            fisheye2 = combined_image[:, w // 2:, :]
+        # Checkbox for enabling refined alignment
+        enable_refined_alignment = st.checkbox("Enable Refined Alignment")
 
-            # Draw overlap lines on the fisheye images
-            fisheye1_overlap = draw_overlap_lines(fisheye1, overlap_angle)
-            fisheye2_overlap = draw_overlap_lines(fisheye2, -overlap_angle)
+         # Assuming an arbitrary overlap width, adjust as necessary
+        overlap_width = 200  # This is just an example value
 
-            # Apply equirectangular projection to each fisheye image
-            with st.spinner("Applying equirectangular projection..."):
-                equi1 = equisolid_to_equirectangular(fisheye1_overlap, output_width // 2, output_height, overlap_angle)
-                equi2 = equisolid_to_equirectangular(fisheye2_overlap, output_width // 2, output_height, -overlap_angle)
+        # Initialize blend_mask with default values
 
-            # Update progress bar
-            progress_bar.progress(1, text="Processing complete!")
+        blend_mask = create_blend_mask(output_width, output_height, overlap_width)
 
-            # Convert the fisheye images from BGR to RGB
-            fisheye1_overlap = cv2.cvtColor(fisheye1_overlap, cv2.COLOR_BGR2RGB)
-            fisheye2_overlap = cv2.cvtColor(fisheye2_overlap, cv2.COLOR_BGR2RGB)
 
-            # Resize the fisheye images to match the size of the original image
-            fisheye1_resized = cv2.resize(fisheye1_overlap, (w // 2, h))
-            fisheye2_resized = cv2.resize(fisheye2_overlap, (w // 2, h))
+        # "Go" button to initiate the stitching process
+        if st.button("Go"):
+            # output_width = st.number_input("Output Width", value=4096, min_value=1024, max_value=8192, step=1)
+            output_height = output_width // 2
+            overlap_width = 200  # Set based on your typical overlap
 
-            # Display the fisheye images with overlap lines side by side
-            st.image([fisheye1_resized, fisheye2_resized], caption=["Fisheye 1 with Overlap", "Fisheye 2 with Overlap"], width=w // 2)
+            # Generate the blend mask for the full width
+            blend_mask = create_blend_mask(output_width, output_height, overlap_width)
 
-            # Convert the equirectangular projections from BGR to RGB
-            equi1 = cv2.cvtColor(equi1, cv2.COLOR_BGR2RGB)
-            equi2 = cv2.cvtColor(equi2, cv2.COLOR_BGR2RGB)
+            equi_left = fisheye_to_equirectangular(fisheye_left, output_width // 2, output_height, fov)
+            equi_right = fisheye_to_equirectangular(fisheye_right, output_width // 2, output_height, fov)
 
-            # Resize the equirectangular projections to match the size of the original image
-            equi1_resized = cv2.resize(equi1, (w // 2, h // 2))
-            equi2_resized = cv2.resize(equi2, (w // 2, h // 2))
+            # Default initialization of control points
+            control_points_left = None
+            control_points_right = None
 
-            # Display the equirectangular projections side by side
-            st.image([equi1_resized, equi2_resized], caption=["Equirectangular Projection 1", "Equirectangular Projection 2"], width=w // 2)
-        
-        if st.button("Convert"):
-            # Show progress bar
-            progress_text = "Processing..."
-            progress_bar = st.progress(0, text=progress_text)
+            # Conditional control point calculation
+            if enable_refined_alignment:
+                # Find matching locations
+                match_loc_left = find_match_loc(equi_left, equi_right)
+                match_loc_right = find_match_loc(equi_right, equi_left)
 
-            # Split the combined image into two fisheye images
-            h, w = combined_image.shape[:2]
-            fisheye1 = combined_image[:, :w // 2, :]
-            fisheye2 = combined_image[:, w // 2:, :]
+                # Assuming valid match locations are found and you have a method to generate control points
+                control_points_left, control_points_right = create_control_points(match_loc_left, match_loc_right, equi_left, equi_right)
 
-            # Stitch the fisheye images
-            with st.spinner("Stitching images..."):
-                try:
-                    equirectangular_img = stitch_fisheye_pair(fisheye1, fisheye2, output_width, output_height, overlap_angle)
-                except ValueError as e:
-                    st.error(str(e))
-                    progress_bar.progress(1, text="Processing failed.")
-                    return
-            
-            # Update progress bar
-            progress_bar.progress(1, text="Processing complete!")
 
-            if equirectangular_img is not None:
-                # Display the stitched image
-                st.image(equirectangular_img, caption="Stitched Equirectangular Image", use_column_width=True)
+            if enable_light_compensation:
+                equi_left = compensate_light(equi_left)
+                equi_right = compensate_light(equi_right)
 
-                # Download button for the stitched image
-                _, buffer = cv2.imencode(".jpg", equirectangular_img)
-                st.download_button(
-                    label="Download Stitched Image",
-                    data=buffer.tobytes(),
-                    file_name="stitched_image.jpg",
-                    mime="image/jpeg"
-                )
+            # Stitching
+            stitched_equirectangular = stitch_equirectangular_pair(equi_left, equi_right, output_width, output_height, control_points_left, control_points_right, blend_mask)
+
+            if stitched_equirectangular is not None:
+                stitched_equirectangular_rgb = cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB)
+                resized_equirectangular = resize_image(stitched_equirectangular_rgb)
+                st.image(resized_equirectangular, caption="Stitched Equirectangular Image", use_column_width=True)
             else:
-                st.error("Failed to stitch the fisheye images.")
+                st.error("Failed to stitch the equirectangular images.")
+
+                # Save the stitched equirectangular image
+            if st.button("Save Equirectangular Image"):
+                cv2.imwrite("stitched_equirectangular.png", stitched_equirectangular)
+                st.success("Equirectangular image saved as 'stitched_equirectangular.png'.")
 
 if __name__ == "__main__":
     main()
