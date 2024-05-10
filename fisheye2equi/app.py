@@ -205,43 +205,39 @@ def main():
         # Checkbox for enabling refined alignment
         enable_refined_alignment = st.checkbox("Enable Refined Alignment")
 
-         # Assuming an arbitrary overlap width, adjust as necessary
-        overlap_width = 200  # This is just an example value
-
-        # Initialize blend_mask with default values
-
-        blend_mask = create_blend_mask(output_width, output_height, overlap_width)
-
+        # Slider for adjusting overlap width
+        overlap_width = st.slider("Overlap Width", min_value=50, max_value=500, value=200, step=10)
 
         # "Go" button to initiate the stitching process
         if st.button("Go"):
-            # output_width = st.number_input("Output Width", value=4096, min_value=1024, max_value=8192, step=1)
-            output_height = output_width // 2
-            overlap_width = 200  # Set based on your typical overlap
-
-            # Generate the blend mask for the full width
-            blend_mask = create_blend_mask(output_width, output_height, overlap_width)
-
             equi_left = fisheye_to_equirectangular(fisheye_left, output_width // 2, output_height, fov)
             equi_right = fisheye_to_equirectangular(fisheye_right, output_width // 2, output_height, fov)
+
+            # Display the equirectangular images
+            st.image(cv2.cvtColor(equi_left, cv2.COLOR_BGR2RGB), caption="Left Equirectangular Image", use_column_width=True)
+            st.image(cv2.cvtColor(equi_right, cv2.COLOR_BGR2RGB), caption="Right Equirectangular Image", use_column_width=True)
 
             # Default initialization of control points
             control_points_left = None
             control_points_right = None
 
-            # Conditional control point calculation
             if enable_refined_alignment:
                 # Find matching locations
                 match_loc_left = find_match_loc(equi_left, equi_right)
                 match_loc_right = find_match_loc(equi_right, equi_left)
 
-                # Assuming valid match locations are found and you have a method to generate control points
-                control_points_left, control_points_right = create_control_points(match_loc_left, match_loc_right, equi_left, equi_right)
-
+                if match_loc_left is not None and match_loc_right is not None:
+                    # Generate control points
+                    control_points_left, control_points_right = create_control_points(match_loc_left, match_loc_right, equi_left, equi_right)
+                else:
+                    st.warning("Failed to find reliable matches for control points. Proceeding with simple alignment.")
 
             if enable_light_compensation:
                 equi_left = compensate_light(equi_left)
                 equi_right = compensate_light(equi_right)
+
+            # Generate the blend mask
+            blend_mask = create_blend_mask(output_width, output_height, overlap_width)
 
             # Stitching
             stitched_equirectangular = stitch_equirectangular_pair(equi_left, equi_right, output_width, output_height, control_points_left, control_points_right, blend_mask)
@@ -253,7 +249,7 @@ def main():
             else:
                 st.error("Failed to stitch the equirectangular images.")
 
-                # Save the stitched equirectangular image
+            # Save the stitched equirectangular image
             if st.button("Save Equirectangular Image"):
                 cv2.imwrite("stitched_equirectangular.png", stitched_equirectangular)
                 st.success("Equirectangular image saved as 'stitched_equirectangular.png'.")
