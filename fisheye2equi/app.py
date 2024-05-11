@@ -1,6 +1,8 @@
 import numpy as np
 import cv2
 import streamlit as st
+import matplotlib.pyplot as plt
+
 
 # Constants for polynomial coefficients
 P1 = -7.5625e-17
@@ -10,41 +12,106 @@ P4 = 6.1997e-08
 P5 = -6.9432e-05
 P6 = 0.9976
 
+
+def compute_radius(phi):
+    return P1*phi**5 + P2*phi**4 + P3*phi**3 + P4*phi**2 + P5*phi + P6
+
+def plot_transformed_coordinates(width, height):
+    phi_values = np.linspace(-np.pi, np.pi, width)
+    theta_values = np.linspace(-np.pi / 2, np.pi / 2, height)
+    X, Y = np.meshgrid(phi_values, theta_values)
+    r = compute_radius(X)
+    x_fish = r * np.cos(Y) * width / 2 + width / 2  # Mapping phi to the x-axis
+    y_fish = r * np.sin(Y) * height / 2 + height / 2  # Mapping theta to the y-axis
+
+    plt.figure(figsize=(10, 5))
+    plt.scatter(x_fish, y_fish, s=1, alpha=0.5)
+    plt.title('Mapped Coordinates from Fisheye to Equirectangular')
+    plt.xlabel('Equirectangular X')
+    plt.ylabel('Equirectangular Y')
+    plt.xlim(0, width)
+    plt.ylim(0, height)
+    plt.grid(True)
+    st.pyplot(plt)
+
+
+def plot_radius_vs_phi():
+    phis = np.linspace(-np.pi, np.pi, 1000)
+    radii = compute_radius(phis)
+    plt.figure(figsize=(10, 4))
+    plt.plot(phis, radii)
+    plt.title('Radius vs Phi')
+    plt.xlabel('Phi (Radians)')
+    plt.ylabel('Radius (r)')
+    plt.grid(True)
+    st.pyplot(plt)
+
+def clamp(value, min_value, max_value):
+    return max(min_value, min(value, max_value))
+
+def spherical_to_cartesian(phi, theta, r_max, image_width, image_height):
+    cx, cy = image_width // 2, image_height // 2
+    r = compute_radius(phi)
+    x_fish = cx + r * r_max * np.cos(theta)
+    y_fish = cy + r * r_max * np.sin(theta)
+    return int(x_fish), int(y_fish)
+
+def create_scale_map(height, width):
+    scale_map = np.ones((height, width), dtype=np.float32)
+    cx, cy = width // 2, height // 2
+    for y in range(height):
+        for x in range(width):
+            r = np.sqrt((x - cx)**2 + (y - cy)**2)
+            scale_map[y, x] = 1 / (1 + 0.01 * r)
+    
+    # Plotting the scale map
+    plt.imshow(scale_map, cmap='gray', vmin=0, vmax=1)
+    plt.colorbar()
+    plt.title('Scale Map Values')
+    st.pyplot(plt)
+    return scale_map
+
+
 def fisheye_to_equirectangular(fisheye_img, width, height, fov=193):
     equirectangular = np.zeros((height, width, 3), dtype=np.uint8)
     if fisheye_img is None:
         return equirectangular, {}
 
     h, w = fisheye_img.shape[:2]
-    cx, cy = w // 2, h // 2  # Center of the fisheye image
-    r_max = min(cx, cy)  # Maximum radius of the fisheye
+    cx, cy = w // 2, h // 2
+    r_max = min(cx, cy)
+
+    # Collecting data for plotting
+    x_fish_values = []
+    y_fish_values = []
 
     for y_eq in range(height):
-        theta = (y_eq / height - 0.5) * np.pi
         for x_eq in range(width):
             phi = (0.5 - x_eq / width) * 2 * np.pi
+            theta = (y_eq / height - 0.5) * np.pi
 
-            # Print theta and phi for a few sample points
-            if x_eq % 100 == 0 and y_eq % 100 == 0:
-                print(f"Sample point: (x_eq={x_eq}, y_eq={y_eq})")
-                print(f"  Theta: {theta:.4f}")
-                print(f"  Phi: {phi:.4f}")
-
-            # Calculate fisheye radius using polynomial coefficients
-            r = P1 * phi**5 + P2 * phi**4 + P3 * phi**3 + P4 * phi**2 + P5 * phi + P6
-            r *= r_max
-
-            # Calculate fisheye coordinates
+            # Existing transformation code
+            r = compute_radius(phi) * r_max
             x_fish = int(cx + r * np.cos(theta))
             y_fish = int(cy + r * np.sin(theta))
+
+            # Append coordinates for plotting
+            x_fish_values.append(x_fish)
+            y_fish_values.append(y_fish)
 
             if 0 <= x_fish < w and 0 <= y_fish < h:
                 equirectangular[y_eq, x_eq, :] = fisheye_img[y_fish, x_fish, :]
 
-    # Debugging: Collect debugging information
+    # Plotting the fisheye coordinates
+    fig, ax = plt.subplots()
+    ax.imshow(fisheye_img)
+    ax.scatter(x_fish_values, y_fish_values, color='red', s=1)
+    st.pyplot(fig)
+    
+    # Debugging information
     debug_info = {
-        "x_fish range": (np.min(x_fish), np.max(x_fish)),
-        "y_fish range": (np.min(y_fish), np.max(y_fish)),
+        "x_fish range": (np.min(x_fish_values), np.max(x_fish_values)),
+        "y_fish range": (np.min(y_fish_values), np.max(y_fish_values)),
         "Equirectangular dimensions": equirectangular.shape,
         "Number of non-zero pixels": np.sum(equirectangular > 0)
     }
@@ -132,7 +199,7 @@ def create_scale_map(height, width):
     for y in range(height):
         for x in range(width):
             r = np.sqrt((x - cx)**2 + (y - cy)**2)
-            scale_map[y, x] = 1 / (1 + 0.01 * r)
+            scale_map[y, x] = 1 / (1 + 0.001 * r)
     return scale_map
 
 def stitch_equirectangular_pair(equi_left, equi_right, width, height, control_points_left=None, control_points_right=None, blend_mask=None):
@@ -191,6 +258,10 @@ def main():
 
     # File upload
     uploaded_file = st.file_uploader("Choose a Gear 360 image file", type=["jpg", "jpeg", "png"])
+
+    if st.button("Show Radius vs Phi Plot"):
+        plot_radius_vs_phi()
+        plot_transformed_coordinates(1920, 1080)
 
     if uploaded_file is not None:
         # Read the uploaded image
