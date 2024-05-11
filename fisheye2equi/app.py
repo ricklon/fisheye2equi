@@ -10,10 +10,10 @@ P4 = 6.1997e-08
 P5 = -6.9432e-05
 P6 = 0.9976
 
-def fisheye_to_equirectangular(fisheye_img, width, height, fov=195):
+def fisheye_to_equirectangular(fisheye_img, width, height, fov=193):
     equirectangular = np.zeros((height, width, 3), dtype=np.uint8)
     if fisheye_img is None:
-        return equirectangular
+        return equirectangular, {}
 
     h, w = fisheye_img.shape[:2]
     cx, cy = w // 2, h // 2  # Center of the fisheye image
@@ -23,6 +23,12 @@ def fisheye_to_equirectangular(fisheye_img, width, height, fov=195):
         theta = (y_eq / height - 0.5) * np.pi
         for x_eq in range(width):
             phi = (0.5 - x_eq / width) * 2 * np.pi
+
+            # Print theta and phi for a few sample points
+            if x_eq % 100 == 0 and y_eq % 100 == 0:
+                print(f"Sample point: (x_eq={x_eq}, y_eq={y_eq})")
+                print(f"  Theta: {theta:.4f}")
+                print(f"  Phi: {phi:.4f}")
 
             # Calculate fisheye radius using polynomial coefficients
             r = P1 * phi**5 + P2 * phi**4 + P3 * phi**3 + P4 * phi**2 + P5 * phi + P6
@@ -35,29 +41,40 @@ def fisheye_to_equirectangular(fisheye_img, width, height, fov=195):
             if 0 <= x_fish < w and 0 <= y_fish < h:
                 equirectangular[y_eq, x_eq, :] = fisheye_img[y_fish, x_fish, :]
 
-    return equirectangular
+    # Debugging: Collect debugging information
+    debug_info = {
+        "x_fish range": (np.min(x_fish), np.max(x_fish)),
+        "y_fish range": (np.min(y_fish), np.max(y_fish)),
+        "Equirectangular dimensions": equirectangular.shape,
+        "Number of non-zero pixels": np.sum(equirectangular > 0)
+    }
 
-def compensate_light(equirectangular_img, clip_limit=2.0, tile_grid_size=(8, 8)):
+    return equirectangular, debug_info
+
+def compensate_light(equirectangular_img, scale_map):
     if equirectangular_img is None:
         return None
 
-    # Convert the image to the LAB color space
-    lab_img = cv2.cvtColor(equirectangular_img, cv2.COLOR_BGR2LAB)
+    # Split the image into BGR channels
+    b, g, r = cv2.split(equirectangular_img)
 
-    # Split the LAB image into L, A, and B channels
-    l_channel, a_channel, b_channel = cv2.split(lab_img)
+    # Apply the scale map to each channel
+    b_compensated = cv2.multiply(b.astype(np.float32), scale_map)
+    g_compensated = cv2.multiply(g.astype(np.float32), scale_map)
+    r_compensated = cv2.multiply(r.astype(np.float32), scale_map)
 
-    # Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to the L channel
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
-    l_channel_equalized = clahe.apply(l_channel)
+    # Merge the compensated channels back into an image
+    compensated_img = cv2.merge((b_compensated, g_compensated, r_compensated))
+    compensated_img = np.clip(compensated_img, 0, 255).astype(np.uint8)
 
-    # Merge the equalized L channel back with the A and B channels
-    lab_img_equalized = cv2.merge((l_channel_equalized, a_channel, b_channel))
+    return compensated_img
 
-    # Convert the image back to the BGR color space
-    equirectangular_img_equalized = cv2.cvtColor(lab_img_equalized, cv2.COLOR_LAB2BGR)
-
-    return equirectangular_img_equalized
+def create_circular_mask(h, w):
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cx, cy = w // 2, h // 2
+    r = min(cx, cy)
+    cv2.circle(mask, (cx, cy), r, 255, -1)
+    return mask
 
 def find_match_loc(ref_img, tmpl_img, method=cv2.TM_CCOEFF_NORMED):
     if ref_img is None or tmpl_img is None:
@@ -107,14 +124,18 @@ def create_control_points(match_loc_left, match_loc_right, equi_left, equi_right
 
     return control_points_left, control_points_right
 
-
+def create_scale_map(height, width):
+    # Create a scale map based on the reverse light fall-off profile
+    # Adjust the values based on your camera specifications
+    scale_map = np.ones((height, width), dtype=np.float32)
+    cx, cy = width // 2, height // 2
+    for y in range(height):
+        for x in range(width):
+            r = np.sqrt((x - cx)**2 + (y - cy)**2)
+            scale_map[y, x] = 1 / (1 + 0.01 * r)
+    return scale_map
 
 def stitch_equirectangular_pair(equi_left, equi_right, width, height, control_points_left=None, control_points_right=None, blend_mask=None):
-    print("Debug before stitching:")
-    print("equi_left shape:", equi_left.shape)
-    print("equi_right shape:", equi_right.shape)
-    print("blend_mask shape:", blend_mask.shape)
-
     if equi_left is None or equi_right is None:
         return None
 
@@ -130,18 +151,16 @@ def stitch_equirectangular_pair(equi_left, equi_right, width, height, control_po
     combined_image = np.concatenate((equi_left, equi_right_aligned), axis=1)
 
     # Apply the blending mask
-    if combined_image.shape[1] != blend_mask.shape[1]:
-        print("Resizing blend mask to match combined image width.")
-        blend_mask = cv2.resize(blend_mask, (combined_image.shape[1], combined_image.shape[0]))
+    if blend_mask is not None:
+        if combined_image.shape[1] != blend_mask.shape[1]:
+            blend_mask = cv2.resize(blend_mask, (combined_image.shape[1], combined_image.shape[0]))
 
-    stitched = combined_image * blend_mask
-    stitched = np.clip(stitched, 0, 255).astype(np.uint8)
+        stitched = combined_image * blend_mask
+        stitched = np.clip(stitched, 0, 255).astype(np.uint8)
+    else:
+        stitched = combined_image
 
     return stitched
-
-
-
-
 
 def create_blend_mask(total_width, height, overlap_width):
     mask = np.zeros((height, total_width), dtype=np.float32)
@@ -156,8 +175,6 @@ def create_blend_mask(total_width, height, overlap_width):
     # Convert mask to 3 channels
     mask = np.stack([mask]*3, axis=-1)
     return mask
-
-
 
 def resize_image(image, max_width=800):
     h, w = image.shape[:2]
@@ -194,29 +211,96 @@ def main():
         fisheye_left = gear360_image[:, :w // 2, :]
         fisheye_right = gear360_image[:, w // 2:, :]
 
+
+        # Debugging: Collect fisheye image dimensions
+        fisheye_debug_info = {
+            "Left fisheye shape": fisheye_left.shape,
+            "Right fisheye shape": fisheye_right.shape
+        }
+
         # Input fields for output size and FOV
         output_width = st.number_input("Output Width", value=4096, min_value=1024, max_value=8192, step=1)
         output_height = output_width // 2
-        fov = st.number_input("Field of View (FOV)", value=195, min_value=180, max_value=220, step=1)
+        fov = st.number_input("Field of View (FOV)", value=193, min_value=180, max_value=220, step=1)
+
+        # Debugging: Collect FOV value
+        fov_debug_info = {
+            "Field of View (FOV)": fov
+        }
+
+
+        # Create circular masks
+        mask_left = create_circular_mask(h, w // 2)
+        mask_right = create_circular_mask(h, w // 2)
+
+        # Apply circular masks to fisheye images
+        fisheye_left_masked = cv2.bitwise_and(fisheye_left, fisheye_left, mask=mask_left)
+        fisheye_right_masked = cv2.bitwise_and(fisheye_right, fisheye_right, mask=mask_right)
+
+       # Display the masked fisheye images side by side
+        st.subheader("Masked Fisheye Images")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(cv2.cvtColor(fisheye_left_masked, cv2.COLOR_BGR2RGB), caption="Left Fisheye Image (Masked)", use_column_width=True)
+        with col2:
+            st.image(cv2.cvtColor(fisheye_right_masked, cv2.COLOR_BGR2RGB), caption="Right Fisheye Image (Masked)", use_column_width=True)
+
+        # Display the circular masks
+        st.subheader("Circular Masks")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(mask_left, caption="Left Mask", use_column_width=True)
+        with col2:
+            st.image(mask_right, caption="Right Mask", use_column_width=True)
+
+
 
         # Checkbox for enabling light compensation
-        enable_light_compensation = st.checkbox("Enable Light Compensation")
+        enable_light_compensation = st.checkbox("Enable Light Compensation", value=True)
+
+        # Create scale map for light compensation
+        scale_map = create_scale_map(output_height, output_width // 2)
 
         # Checkbox for enabling refined alignment
-        enable_refined_alignment = st.checkbox("Enable Refined Alignment")
+        enable_refined_alignment = st.checkbox("Enable Refined Alignment", value=True)
 
         # Slider for adjusting overlap width
         overlap_width = st.slider("Overlap Width", min_value=50, max_value=500, value=200, step=10)
 
-        # "Go" button to initiate the stitching process
-        if st.button("Go"):
-            equi_left = fisheye_to_equirectangular(fisheye_left, output_width // 2, output_height, fov)
-            equi_right = fisheye_to_equirectangular(fisheye_right, output_width // 2, output_height, fov)
+        # Convert fisheye images to equirectangular
+        equi_left, debug_info_left = fisheye_to_equirectangular(fisheye_left_masked, output_width // 2, output_height, fov)
+        equi_right, debug_info_right = fisheye_to_equirectangular(fisheye_right_masked, output_width // 2, output_height, fov)
 
-            # Display the equirectangular images
-            st.image(cv2.cvtColor(equi_left, cv2.COLOR_BGR2RGB), caption="Left Equirectangular Image", use_column_width=True)
-            st.image(cv2.cvtColor(equi_right, cv2.COLOR_BGR2RGB), caption="Right Equirectangular Image", use_column_width=True)
+        # Debugging: Collect equirectangular image dimensions
+        equi_debug_info = {
+            "Left equirectangular shape": equi_left.shape,
+            "Right equirectangular shape": equi_right.shape
+        }
 
+        # Display debugging information to the user
+        st.subheader("Debugging Information")
+        st.write("Fisheye Image Dimensions:")
+        st.info(fisheye_debug_info)
+        st.write("Field of View (FOV):")
+        st.info(fov_debug_info)
+        st.write("Fisheye to Equirectangular Conversion (Left):")
+        st.info(debug_info_left)
+        st.write("Fisheye to Equirectangular Conversion (Right):")
+        st.info(debug_info_right)
+        st.write("Equirectangular Image Dimensions:")
+        st.info(equi_debug_info)
+
+        if enable_light_compensation:
+            equi_left = compensate_light(equi_left, scale_map)
+            equi_right = compensate_light(equi_right, scale_map)
+
+        # Display the equirectangular images
+        st.subheader("Preview")
+        st.image(cv2.cvtColor(equi_left, cv2.COLOR_BGR2RGB), caption="Left Equirectangular Image", use_column_width=True)
+        st.image(cv2.cvtColor(equi_right, cv2.COLOR_BGR2RGB), caption="Right Equirectangular Image", use_column_width=True)
+
+        # Stitch button
+        if st.button("Stitch Images"):
             # Default initialization of control points
             control_points_left = None
             control_points_right = None
@@ -232,10 +316,6 @@ def main():
                 else:
                     st.warning("Failed to find reliable matches for control points. Proceeding with simple alignment.")
 
-            if enable_light_compensation:
-                equi_left = compensate_light(equi_left)
-                equi_right = compensate_light(equi_right)
-
             # Generate the blend mask
             blend_mask = create_blend_mask(output_width, output_height, overlap_width)
 
@@ -245,6 +325,7 @@ def main():
             if stitched_equirectangular is not None:
                 stitched_equirectangular_rgb = cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB)
                 resized_equirectangular = resize_image(stitched_equirectangular_rgb)
+                st.subheader("Stitched Image")
                 st.image(resized_equirectangular, caption="Stitched Equirectangular Image", use_column_width=True)
             else:
                 st.error("Failed to stitch the equirectangular images.")
