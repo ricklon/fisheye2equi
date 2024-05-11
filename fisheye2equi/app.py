@@ -303,72 +303,35 @@ def main():
 
     # File upload
     uploaded_file = st.file_uploader("Choose a Gear 360 image file", type=["jpg", "jpeg", "png"])
-
     if uploaded_file is not None:
-        # Read the uploaded image
+        # Read and display the image
         file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
         gear360_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-        # Convert the uploaded image from BGR to RGB
         gear360_image_rgb = cv2.cvtColor(gear360_image, cv2.COLOR_BGR2RGB)
-
-        # Resize the image for display
         resized_image = resize_image(gear360_image_rgb)
-
-        # Display the resized uploaded image
         st.image(resized_image, caption="Uploaded Gear 360 Image", use_column_width=True)
 
         # Checkbox for resizing images for testing
-        resize_for_testing = st.checkbox("Resize Images for Testing", value=False)
-
+        resize_for_testing = st.checkbox("Resize Images for Testing", value=True)
+        
         if resize_for_testing:
-            # Resize the image to a smaller size for testing
-            test_size = (640, 320)  # Adjust the size as needed
+            test_size = (640, 320)
             gear360_image_resized = cv2.resize(gear360_image, test_size)
-            fisheye_left = gear360_image_resized[:, :test_size[0] // 2, :]
-            fisheye_right = gear360_image_resized[:, test_size[0] // 2:, :]
+            fisheye_left = gear360_image_resized[:, :test_size[0] // 2]
+            fisheye_right = gear360_image_resized[:, test_size[0] // 2:]
             output_width = test_size[0]
             output_height = test_size[1] // 2
         else:
-            # Split the Gear 360 image into left and right fisheye images
             h, w = gear360_image.shape[:2]
-            fisheye_left = gear360_image[:, :w // 2, :]
-            fisheye_right = gear360_image[:, w // 2:, :]
+            fisheye_left = gear360_image[:, :w // 2]
+            fisheye_right = gear360_image[:, w // 2:]
             output_width = st.number_input("Output Width", value=4096, min_value=1024, max_value=8192, step=1)
             output_height = output_width // 2
 
-        # Input field for FOV
         fov = st.number_input("Field of View (FOV)", value=193, min_value=180, max_value=220, step=1)
+        equi_left = fisheye_to_equirectangular(fisheye_left, output_width // 2, output_height, fov)
+        equi_right = fisheye_to_equirectangular(fisheye_right, output_width // 2, output_height, fov)
 
-        # Create circular masks
-        mask_left = create_circular_mask(fisheye_left.shape[0], fisheye_left.shape[1], fov)
-        mask_right = create_circular_mask(fisheye_right.shape[0], fisheye_right.shape[1], fov)
-
-        # Apply circular masks to fisheye images
-        fisheye_left_masked = cv2.bitwise_and(fisheye_left, fisheye_left, mask=mask_left)
-        fisheye_right_masked = cv2.bitwise_and(fisheye_right, fisheye_right, mask=mask_right)
-
-        # Checkbox for enabling light compensation
-        enable_light_compensation = st.checkbox("Enable Light Compensation", value=True)
-
-        # Create scale map for light compensation
-        scale_map = create_scale_map(output_height, output_width // 2)
-
-        # Checkbox for enabling refined alignment
-        enable_refined_alignment = st.checkbox("Enable Refined Alignment", value=True)
-
-        # Slider for adjusting overlap width
-        overlap_width = st.slider("Overlap Width", min_value=50, max_value=500, value=200, step=10)
-
-        # Convert fisheye images to equirectangular
-        equi_left = fisheye_to_equirectangular(fisheye_left_masked, output_width // 2, output_height, fov)
-        equi_right = fisheye_to_equirectangular(fisheye_right_masked, output_width // 2, output_height, fov)
-
-        if enable_light_compensation:
-            equi_left = compensate_light(equi_left, scale_map)
-            equi_right = compensate_light(equi_right, scale_map)
-
-        # Display the equirectangular images
         st.subheader("Preview")
         col1, col2 = st.columns(2)
         with col1:
@@ -376,39 +339,38 @@ def main():
         with col2:
             st.image(cv2.cvtColor(equi_right, cv2.COLOR_BGR2RGB), caption="Right Equirectangular Image", use_column_width=True)
 
+        
+
         # Stitch button
         if st.button("Stitch Images"):
-            # Default initialization of control points
-            control_points_left = None
-            control_points_right = None
+            # Find matching locations
+            match_loc_left = find_match_loc(equi_left, equi_right)
+            match_loc_right = find_match_loc(equi_right, equi_left)
 
-            if enable_refined_alignment:
-                # Find matching locations
-                match_loc_left = find_match_loc(equi_left, equi_right)
-                match_loc_right = find_match_loc(equi_right, equi_left)
+            # Validate and generate control points
+            validated_left, validated_right = validate_match_locations(match_loc_left, match_loc_right, equi_left, equi_right)
 
-                if match_loc_left is not None and match_loc_right is not None:
-                    # Generate control points
-                    control_points_left, control_points_right = create_control_points(match_loc_left, match_loc_right, equi_left, equi_right)
+            if validated_left is not None and validated_right is not None:
+                control_points_left, control_points_right = generate_control_points(validated_left, validated_right, equi_left, equi_right)
+                
+                # Perform the stitching
+                stitched_equirectangular = stitch_equirectangular_pair(equi_left, equi_right, output_width, output_height, fov, control_points_left, control_points_right)
+                if stitched_equirectangular is not None:
+                    st.subheader("Stitched Image")
+                    # Checkbox for user to choose between original or resized image
+                    show_resized = st.checkbox("Show Resized Image", value=True)
+                    if show_resized:
+                        resized_stitched = resize_image(cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB))
+                        st.image(resized_stitched, caption="Resized Stitched Equirectangular Image", use_column_width=True)
+                    else:
+                        st.image(cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB), caption="Original Stitched Equirectangular Image", use_column_width=True)
                 else:
-                    st.warning("Failed to find reliable matches for control points. Proceeding with simple alignment.")
-
-            # Generate the blend mask
-            blend_mask = create_blend_mask(output_width, output_height, overlap_width)
-
-            # Stitching
-            stitched_equirectangular = stitch_equirectangular_pair(equi_left, equi_right, output_width, output_height, control_points_left, control_points_right, blend_mask)
-
-            if stitched_equirectangular is not None:
-                stitched_equirectangular_rgb = cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB)
-                resized_equirectangular = resize_image(stitched_equirectangular_rgb)
-                st.subheader("Stitched Image")
-                st.image(resized_equirectangular, caption="Stitched Equirectangular Image", use_column_width=True)
+                    st.error("Failed to stitch the equirectangular images.")
             else:
-                st.error("Failed to stitch the equirectangular images.")
+                st.error("Control point validation failed.")
 
-            # Save the stitched equirectangular image
-            if st.button("Save Equirectangular Image"):
+            # Save stitched image
+            if stitched_equirectangular is not None and st.button("Save Equirectangular Image"):
                 cv2.imwrite("stitched_equirectangular.png", stitched_equirectangular)
                 st.success("Equirectangular image saved as 'stitched_equirectangular.png'.")
 
