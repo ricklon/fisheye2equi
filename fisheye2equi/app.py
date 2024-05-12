@@ -138,10 +138,7 @@ def find_match_loc(ref_img, tmpl_img, method=cv2.TM_CCOEFF_NORMED):
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
 
     match_loc = max_loc if method not in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED] else min_loc
-    if match_loc and len(match_loc) == 2:
-        return match_loc
-    else:
-        return None
+    return match_loc
 
 
 def validate_match_locations(match_loc_left, match_loc_right, equi_left, equi_right):
@@ -150,10 +147,7 @@ def validate_match_locations(match_loc_left, match_loc_right, equi_left, equi_ri
         print("Error: Match locations are None.")
         return None, None
 
-    # Convert match locations to integers and ensure they are 1D arrays with size 2
-    match_loc_left = np.array(match_loc_left, dtype=int)
-    match_loc_right = np.array(match_loc_right, dtype=int)
-    
+    # Ensure match locations are 1D arrays with size 2
     if match_loc_left.size != 2 or match_loc_right.size != 2:
         print("Error: Match locations should be arrays of size 2.")
         return None, None
@@ -192,15 +186,6 @@ def generate_control_points(match_loc_left, match_loc_right, equi_left, equi_rig
 
 def create_control_points(match_loc_left, match_loc_right, equi_left, equi_right, template_size=(200, 100), num_points=10):
     if match_loc_left is None or match_loc_right is None:
-        return None, None
-
-    # Convert match locations to integer if they are arrays
-    match_loc_left = np.array(match_loc_left, dtype=int)
-    match_loc_right = np.array(match_loc_right, dtype=int)
-
-    # Ensure they are not empty and are 1D arrays with size 2
-    if match_loc_left.size != 2 or match_loc_right.size != 2:
-        print("Error: Match locations should be arrays of size 2.")
         return None, None
 
     h, w = template_size
@@ -339,35 +324,34 @@ def main():
         with col2:
             st.image(cv2.cvtColor(equi_right, cv2.COLOR_BGR2RGB), caption="Right Equirectangular Image", use_column_width=True)
 
-        
-
         # Stitch button
         if st.button("Stitch Images"):
             # Find matching locations
             match_loc_left = find_match_loc(equi_left, equi_right)
             match_loc_right = find_match_loc(equi_right, equi_left)
 
-            # Validate and generate control points
-            validated_left, validated_right = validate_match_locations(match_loc_left, match_loc_right, equi_left, equi_right)
-
-            if validated_left is not None and validated_right is not None:
-                control_points_left, control_points_right = generate_control_points(validated_left, validated_right, equi_left, equi_right)
-                
-                # Perform the stitching
-                stitched_equirectangular = stitch_equirectangular_pair(equi_left, equi_right, output_width, output_height, fov, control_points_left, control_points_right)
-                if stitched_equirectangular is not None:
-                    st.subheader("Stitched Image")
-                    # Checkbox for user to choose between original or resized image
-                    show_resized = st.checkbox("Show Resized Image", value=True)
-                    if show_resized:
-                        resized_stitched = resize_image(cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB))
-                        st.image(resized_stitched, caption="Resized Stitched Equirectangular Image", use_column_width=True)
-                    else:
-                        st.image(cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB), caption="Original Stitched Equirectangular Image", use_column_width=True)
-                else:
-                    st.error("Failed to stitch the equirectangular images.")
+            if match_loc_left is None or match_loc_right is None:
+                st.error("Failed to find matching locations.")
             else:
-                st.error("Control point validation failed.")
+                # Generate control points
+                control_points_left, control_points_right = create_control_points(match_loc_left, match_loc_right, equi_left, equi_right)
+
+                if control_points_left is None or control_points_right is None:
+                    st.error("Failed to generate control points.")
+                else:
+                    # Perform the stitching
+                    stitched_equirectangular = stitch_equirectangular_pair(equi_left, equi_right, output_width, output_height, fov, match_loc_left, match_loc_right, template_size=(200, 100), num_points=10)
+                    if stitched_equirectangular is not None:
+                        st.subheader("Stitched Image")
+                        # Checkbox for user to choose between original or resized image
+                        show_resized = st.checkbox("Show Resized Image", value=True)
+                        if show_resized:
+                            resized_stitched = resize_image(cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB))
+                            st.image(resized_stitched, caption="Resized Stitched Equirectangular Image", use_column_width=True)
+                        else:
+                            st.image(cv2.cvtColor(stitched_equirectangular, cv2.COLOR_BGR2RGB), caption="Original Stitched Equirectangular Image", use_column_width=True)
+                    else:
+                        st.error("Failed to stitch the equirectangular images.")
 
             # Save stitched image
             if stitched_equirectangular is not None and st.button("Save Equirectangular Image"):
