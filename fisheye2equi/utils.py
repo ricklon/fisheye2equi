@@ -1,35 +1,47 @@
-from PIL import Image
-import exif
+# fisheye2equi/utils.py
 
-def extract_image_info(image_file):
-    """
-    Extract metadata and size information from an uploaded image file.
-    
-    :param image_file: UploadedFile object from Streamlit
-    :return: Dictionary containing image information
-    """
-    info = {}
-    
-    # Get file size
-    info['file_size'] = image_file.size / (1024 * 1024)  # Size in MB
-    
-    # Open image and get dimensions
-    img = Image.open(image_file)
-    info['width'], info['height'] = img.size
-    info['aspect_ratio'] = info['width'] / info['height']
-    
-    # Extract EXIF metadata
-    image_file.seek(0)  # Reset file pointer to beginning
-    exif_image = exif.Image(image_file)
-    if exif_image.has_exif:
-        info['camera_make'] = exif_image.get('make', 'Unknown')
-        info['camera_model'] = exif_image.get('model', 'Unknown')
-        info['datetime'] = exif_image.get('datetime', 'Unknown')
-        info['focal_length'] = exif_image.get('focal_length', 'Unknown')
-        info['f_number'] = exif_image.get('f_number', 'Unknown')
-        info['iso'] = exif_image.get('iso', 'Unknown')
-    else:
-        info['exif_data'] = 'No EXIF data found'
-    
-    return info
- 
+import logging
+from PIL import Image, ExifTags
+import numpy as np
+import io
+
+logger = logging.getLogger(__name__)
+
+def extract_image_info(uploaded_file):
+    image_info = {}
+    try:
+        # Read the image using PIL
+        image = Image.open(uploaded_file)
+        
+        # Get basic image info
+        image_info['width'], image_info['height'] = image.size
+        image_info['aspect_ratio'] = image.size[0] / image.size[1]
+        image_info['file_size'] = uploaded_file.size / (1024 * 1024)  # Size in MB
+        
+        # Extract EXIF data
+        exif_data = image._getexif()
+        if exif_data:
+            exif = {
+                ExifTags.TAGS.get(k, k): v
+                for k, v in exif_data.items()
+            }
+            image_info['exif_data'] = exif
+            image_info['camera_make'] = exif.get('Make', 'Unknown')
+            image_info['camera_model'] = exif.get('Model', 'Unknown')
+            image_info['datetime'] = exif.get('DateTime', 'Unknown')
+            image_info['focal_length'] = exif.get('FocalLength', 'Unknown')
+            image_info['f_number'] = exif.get('FNumber', 'Unknown')
+            image_info['iso'] = exif.get('ISOSpeedRatings', 'Unknown')
+        else:
+            image_info['exif_data'] = {}
+            image_info['camera_make'] = 'Unknown'
+            image_info['camera_model'] = 'Unknown'
+            image_info['datetime'] = 'Unknown'
+            image_info['focal_length'] = 'Unknown'
+            image_info['f_number'] = 'Unknown'
+            image_info['iso'] = 'Unknown'
+        
+        return image_info
+    except Exception as e:
+        logger.error(f"Failed to extract image info: {str(e)}")
+        return {}

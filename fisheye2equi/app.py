@@ -6,29 +6,21 @@ import sys
 import os
 import io
 
-# Add the parent directory to sys.path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from fisheye2equi.utils import extract_image_info
+# Adjust the import paths as necessary
 from fisheye2equi.stitching import stitch_gear360_image
-from logging_config import setup_logging  # Import the logging setup
+from fisheye2equi.utils import extract_image_info
+from logging_config import setup_logging
 
 def main():
     st.title("Gear 360 Image Stitcher")
 
-    # Set up logging
-    debug_mode = st.sidebar.checkbox("Enable Debug Mode")
+    # Set up logging with debug mode on by default
+    debug_mode = st.sidebar.checkbox("Debug Mode", value=True)
     logger = setup_logging(debug_mode)
     logger.info("Gear 360 Image Stitcher started")
 
-    # Create two columns for method selection
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        rotation_method = st.selectbox("Select Rotation Method", ['simple', 'advanced'])
-    
-    with col2:
-        stitching_method = st.selectbox("Select Stitching Method", ['simple', 'advanced'])
+    # Since rotation method is now handled inside fisheye_to_equirectangular, we can remove the rotation method selection
+    stitching_method = st.sidebar.radio("Select Stitching Method", ['simple'])  # Currently, only 'simple' is implemented
 
     uploaded_file = st.file_uploader("Choose a Gear 360 image file", type=["jpg", "jpeg", "png"])
     
@@ -71,31 +63,30 @@ def main():
                 if 'exif_data' in image_info:
                     st.write(image_info['exif_data'])
                 else:
-                    st.write(f"Camera Make: {image_info['camera_make']}")
-                    st.write(f"Camera Model: {image_info['camera_model']}")
-                    st.write(f"Date/Time: {image_info['datetime']}")
-                    st.write(f"Focal Length: {image_info['focal_length']}")
-                    st.write(f"F-Number: {image_info['f_number']}")
-                    st.write(f"ISO: {image_info['iso']}")
+                    st.write(f"Camera Make: {image_info.get('camera_make', 'Unknown')}")
+                    st.write(f"Camera Model: {image_info.get('camera_model', 'Unknown')}")
+                    st.write(f"Date/Time: {image_info.get('datetime', 'Unknown')}")
+                    st.write(f"Focal Length: {image_info.get('focal_length', 'Unknown')}")
+                    st.write(f"F-Number: {image_info.get('f_number', 'Unknown')}")
+                    st.write(f"ISO: {image_info.get('iso', 'Unknown')}")
             
             # Determine which .pto profile to use based on image info
-            if image_info['camera_model'] == 'SM-C200':
+            if image_info.get('camera_model') == 'SM-C200':
                 pto_profile = 'gear360sm-c200.pto'
-            elif image_info['camera_model'] == 'SM-R210':
+            elif image_info.get('camera_model') == 'SM-R210':
                 pto_profile = 'gear360sm-r210.pto'
             else:
-                logger.warning(f"Unsupported camera model: {image_info['camera_model']}. Using default profile.")
-                st.warning(f"Unsupported camera model: {image_info['camera_model']}. Using default profile.")
+                logger.warning(f"Unsupported camera model: {image_info.get('camera_model', 'Unknown')}. Using default profile.")
+                st.warning(f"Unsupported camera model: {image_info.get('camera_model', 'Unknown')}. Using default profile.")
                 pto_profile = 'gear360sm-c200.pto'  # Use a default profile
             
             # Stitch button
             if st.button("Stitch Image"):
-                logger.info(f"Stitching process started with rotation method: {rotation_method}, stitching method: {stitching_method}")
+                logger.info(f"Stitching process started with stitching method: {stitching_method}")
                 st.write("Stitching in progress...")
                 try:
-                    stitched_image, debug_images = stitch_gear360_image(opencv_image, pto_profile, image_info, 
-                                                                        rotation_method=rotation_method, 
-                                                                        stitching_method=stitching_method, 
+                    stitched_image, debug_images = stitch_gear360_image(opencv_image, pto_profile, image_info,
+                                                                        stitching_method=stitching_method,
                                                                         debug=debug_mode)
                     
                     if stitched_image is not None:
@@ -113,23 +104,14 @@ def main():
                         )
                         
                         # Display debug images if debug mode is enabled
-                        if debug_mode and debug_images:
+                        if debug_images:
                             logger.debug("Displaying debug images")
                             st.subheader("Debug Images")
                             
-                            # Create a 2x2 grid for debug images
-                            col1, col2 = st.columns(2)
-                            col3, col4 = st.columns(2)
-                            
+                            # Create a 3x3 grid for debug images
+                            cols = st.columns(3)
                             for i, (title, image) in enumerate(debug_images.items()):
-                                if i % 4 == 0:
-                                    col1.image(image, caption=title, use_column_width=True)
-                                elif i % 4 == 1:
-                                    col2.image(image, caption=title, use_column_width=True)
-                                elif i % 4 == 2:
-                                    col3.image(image, caption=title, use_column_width=True)
-                                else:
-                                    col4.image(image, caption=title, use_column_width=True)
+                                cols[i % 3].image(image, caption=title, use_column_width=True)
                     else:
                         logger.error("Stitching failed. The image may not be compatible or there might be an issue with the stitching process.")
                         st.error("Stitching failed. The image may not be compatible or there might be an issue with the stitching process.")
